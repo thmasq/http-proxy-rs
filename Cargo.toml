@@ -1,7 +1,7 @@
 [package]
 name = "http-proxy-rs"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 pingora = "0.6.0"
@@ -24,8 +24,11 @@ http = "1.3"
 bytes = "1.10"
 sha2 = "0.10"
 hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+pingora-memory-cache = "0.6.0"
 
 [profile.release]
 # lto = true
 # codegen-units = 1
 panic = "abort"
+strip = true

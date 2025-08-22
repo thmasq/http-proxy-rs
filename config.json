@@ -1,0 +1,45 @@
+{
+  "allowed_domains": [
+    "api.fxtwitter.com",
+    "fxtwitter.com", 
+    "example.com",
+    "httpbin.org"
+  ],
+  "blocked_domains": [],
+  "rate_limit_per_minute": 60,
+  "custom_headers": {
+    "X-Proxy-By": "EmbedProxy/1.0"
+  },
+  "strip_tracking_headers": true,
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "upstream_timeout": 30,
+  "connection_timeout": 10,
+  "read_timeout": 30,
+  "write_timeout": 30,
+  "cache": {
+    "enabled": true,
+    "max_items": 10000,
+    "default_ttl_seconds": 3600,
+    "max_ttl_seconds": 86400,
+    "max_item_size_mb": 10,
+    "cacheable_status_codes": [200, 203, 300, 301, 302, 404, 410],
+    "cacheable_content_types": [
+      "text/html",
+      "text/css", 
+      "text/javascript",
+      "application/javascript",
+      "application/json",
+      "image/jpeg",
+      "image/png",
+      "image/gif", 
+      "image/webp",
+      "image/svg+xml"
+    ],
+    "no_cache_domains": [
+      "api.twitter.com",
+      "graph.facebook.com"
+    ],
+    "enable_compression": true
+  },
+  "enable_metrics": true
+}
