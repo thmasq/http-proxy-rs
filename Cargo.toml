@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-pingora = "0.6.0"
+pingora = { version = "0.6.0", features = ["rustls"] }
 pingora-core = "0.6.0"
 pingora-proxy = "0.6.0"
 pingora-http = "0.6.0"
@@ -26,6 +26,8 @@ sha2 = "0.10"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 pingora-memory-cache = "0.6.0"
+once_cell = "1.21.3"
+pingora-error = "0.6.0"
 
 [profile.release]
 # lto = true

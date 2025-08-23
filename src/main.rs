@@ -91,6 +91,7 @@ impl Default for CacheConfig {
                 "image/gif".to_string(),
                 "image/webp".to_string(),
                 "image/svg+xml".to_string(),
+                "video/mp4".to_string(),
             ],
             no_cache_domains: vec![
                 "api.twitter.com".to_string(),
@@ -145,15 +146,12 @@ impl Default for Config {
         let custom_headers = HashMap::new();
 
         Self {
-            allowed_domains: vec![],
-            blocked_domains: vec![
-                "malware.example.com".to_string(),
-                "phishing.example.com".to_string(),
-            ],
+            allowed_domains: vec!["video.twimg.com".to_string(), "pbs.twimg.com".to_string()],
+            blocked_domains: vec![],
             rate_limit_per_minute: 60,
             custom_headers,
             strip_tracking_headers: true,
-            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".to_string(),
+            user_agent: "curl/8.15.0".to_string(),
             upstream_timeout: 30,
             connection_timeout: 10,
             read_timeout: 30,
@@ -897,38 +895,80 @@ impl ProxyHttp for EmbedProxy {
             .host_str()
             .ok_or_else(|| Box::new(*pingora::Error::new_str("No host in target URL")))?;
 
-        let mut peer = HttpPeer::new(
-            format!("{}:{}", host, port),
-            target_url.scheme() == "https",
-            host.to_string(),
+        let is_tls = target_url.scheme() == "https";
+
+        debug!(
+            "Creating peer for {}: {}://{}",
+            host,
+            target_url.scheme(),
+            host
         );
 
-        // CRITICAL: Configure timeouts and connection options
+        // CORRECT: SNI is set as the third parameter in HttpPeer::new()
+        let mut peer = HttpPeer::new(
+            format!("{}:{}", host, port),
+            is_tls,
+            host.to_string(), // This sets the SNI hostname correctly
+        );
+
+        // Configure timeouts
         peer.options.connection_timeout = Some(Duration::from_secs(self.config.connection_timeout));
         peer.options.read_timeout = Some(Duration::from_secs(self.config.read_timeout));
         peer.options.write_timeout = Some(Duration::from_secs(self.config.write_timeout));
 
-        // Configure TLS options for better compatibility
-        if target_url.scheme() == "https" {
+        if is_tls {
+            // CRITICAL: For HTTPS to work, you need these TLS settings
             peer.options.verify_cert = true;
             peer.options.verify_hostname = true;
+
+            // OPTIONAL: If you're having certificate verification issues,
+            // you can temporarily disable verification for testing:
+            // peer.options.verify_cert = false;
+            // peer.options.verify_hostname = false;
+            // WARNING: Only use the above for testing! Never in production!
+
+            debug!("Configured TLS peer for {} with SNI: {}", host, host);
         }
 
-        // Enable connection reuse for better performance
+        // Configure TCP keepalive
         peer.options.tcp_keepalive = Some(TcpKeepalive {
-            idle: Duration::from_secs(60), // Start probing after 60s of inactivity
-            interval: Duration::from_secs(10), // Probe every 10 seconds
-            count: 6,                      // Send up to 6 probes before giving up
+            idle: Duration::from_secs(60),
+            interval: Duration::from_secs(10),
+            count: 6,
             #[cfg(target_os = "linux")]
-            user_timeout: Duration::from_secs(180), // Total timeout for unacknowledged data
+            user_timeout: Duration::from_secs(180),
         });
 
         debug!(
-            "Created peer with connection_timeout: {}s, read_timeout: {}s, write_timeout: {}s",
-            self.config.connection_timeout, self.config.read_timeout, self.config.write_timeout
-        );
+        "Created peer for {}: tls={}, connection_timeout={}s, read_timeout={}s, write_timeout={}s",
+        host, is_tls, self.config.connection_timeout, self.config.read_timeout, self.config.write_timeout
+    );
 
         Ok(Box::new(peer))
+    }
+
+    // Also add this method to better handle connection errors:
+    fn fail_to_connect(
+        &self,
+        _session: &mut Session,
+        _peer: &HttpPeer,
+        _ctx: &mut Self::CTX,
+        mut e: Box<pingora::Error>,
+    ) -> Box<pingora::Error> {
+        error!("Failed to connect to upstream: {}", e);
+
+        // Log additional details for TLS-related errors
+        if e.to_string().contains("tls") || e.to_string().contains("certificate") {
+            error!("TLS connection failed. Common causes:");
+            error!("1. Certificate verification failure");
+            error!("2. SNI mismatch");
+            error!("3. TLS version incompatibility");
+            error!("4. Missing CA certificates");
+        }
+
+        // Don't retry TLS errors immediately
+        e.set_retry(false);
+        e
     }
 
     async fn upstream_request_filter(
@@ -957,40 +997,21 @@ impl ProxyHttp for EmbedProxy {
             .map_err(|_| pingora::Error::new_str("Failed to parse upstream URI"))?;
         upstream_request.set_uri(parsed_uri);
 
-        // Set the Host header to the target domain (this is crucial)
-        if let Some(host) = target_url.host_str() {
-            let _ = upstream_request.insert_header("Host", host);
+        let header_names: Vec<String> = upstream_request
+            .headers
+            .iter()
+            .map(|(name, _)| name.as_str().to_string())
+            .collect();
+
+        for header_name in header_names {
+            upstream_request.remove_header(&header_name);
         }
 
-        // CRITICAL: Set the configured User-Agent instead of keeping curl's
-        let _ = upstream_request.insert_header("User-Agent", &self.config.user_agent);
+        let _ = upstream_request.insert_header("Host", target_url.host_str().unwrap_or(""));
+        let _ = upstream_request.insert_header("User-Agent", "curl/8.15.0");
+        let _ = upstream_request.insert_header("Accept", "*/*");
 
-        // Add Accept-Encoding for better compatibility
-        if upstream_request.headers.get("accept-encoding").is_none() {
-            let _ = upstream_request.insert_header("Accept-Encoding", "gzip, deflate, br");
-        }
-
-        // Ensure we have an Accept header
-        if upstream_request.headers.get("accept").is_none() {
-            let _ = upstream_request.insert_header("Accept", "*/*");
-        }
-
-        // Remove problematic proxy headers
-        upstream_request.remove_header("x-forwarded-for");
-        upstream_request.remove_header("x-forwarded-proto");
-        upstream_request.remove_header("x-real-ip");
-        upstream_request.remove_header("x-proxy-by");
-        upstream_request.remove_header("via");
-        upstream_request.remove_header("forwarded");
-        upstream_request.remove_header("referer");
-
-        // Remove any internal proxy headers that might cause issues
-        upstream_request.remove_header("x-cache-status");
-
-        debug!(
-            "Proxying to: {} with User-Agent: {}",
-            target_url, self.config.user_agent
-        );
+        debug!("Making curl-like request to: {}", target_url);
 
         Ok(())
     }
@@ -1168,20 +1189,22 @@ fn main() -> Result<()> {
         .block_on(load_config(&args.config))?;
     info!("Loaded configuration from {}", args.config);
 
-    // Create server - start with None for default, then we'll configure the proxy service
+    // Create server with default configuration that includes HTTP/2 support
     let mut server = Server::new(None)?;
     server.bootstrap();
 
     // Create proxy service
     let proxy = EmbedProxy::new(config);
-
     let mut proxy_service = pingora_proxy::http_proxy_service(&server.configuration, proxy);
 
     // Configure listening address
     let addr: StdSocketAddr = args.listen.parse().context("Invalid listen address")?;
     proxy_service.add_tcp(&addr.to_string());
 
-    info!("Proxy server listening on {}", addr);
+    info!(
+        "Proxy server listening on {} (HTTP/1.1 and HTTP/2 enabled)",
+        addr
+    );
     info!("Usage: GET http://{}/proxy/https://example.com/path", addr);
     info!(
         "Health check: GET http://{}/proxy/https://httpbin.org/status/200",

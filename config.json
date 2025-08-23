@@ -1,9 +1,7 @@
 {
   "allowed_domains": [
-    "api.fxtwitter.com",
-    "fxtwitter.com", 
-    "example.com",
-    "httpbin.org"
+    "video.twimg.com",
+    "pbs.twimg.com"
   ],
   "blocked_domains": [],
   "rate_limit_per_minute": 60,
@@ -11,7 +9,7 @@
     "X-Proxy-By": "EmbedProxy/1.0"
   },
   "strip_tracking_headers": true,
-  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "user_agent": "curl/8.15.0",
   "upstream_timeout": 30,
   "connection_timeout": 10,
   "read_timeout": 30,
@@ -33,7 +31,8 @@
       "image/png",
       "image/gif", 
       "image/webp",
-      "image/svg+xml"
+      "image/svg+xml",
+      "video/mp4"
     ],
     "no_cache_domains": [
       "api.twitter.com",
