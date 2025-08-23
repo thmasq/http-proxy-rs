@@ -224,7 +224,7 @@ jobs:
          - CORS header injection
          - Tracking header removal
          - Systemd integration
-        Homepage: https://github.com/your-username/http-proxy-rs
+        Homepage: https://github.com/thmasq/http-proxy-rs
         EOF
 
     - name: Build Debian package
@@ -235,16 +235,6 @@ jobs:
       run: |
         dpkg-deb --info http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
         dpkg-deb --contents http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
-
-    - name: Upload Debian package to release
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
-        asset_name: http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
-        asset_content_type: application/vnd.debian.binary-package
 
     - name: Generate installation instructions
       run: |
@@ -284,12 +274,11 @@ jobs:
         ```
         EOF
 
-    - name: Upload installation instructions
-      uses: actions/upload-release-asset@v1
+    - name: Upload release assets
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./installation-instructions.md
-        asset_name: installation-instructions.md
-        asset_content_type: text/markdown
+      run: |
+        gh release upload ${{ steps.get_version.outputs.VERSION }} \
+          http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb \
+          installation-instructions.md \
+          --clobber
