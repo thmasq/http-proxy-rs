@@ -1,0 +1,295 @@
+name: Build and Publish Debian Package
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          pkg-config \
+          libssl-dev \
+          curl
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo index
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache target directory
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build release binary
+      run: cargo build --release
+
+    - name: Get release version
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+    - name: Create Debian package structure
+      run: |
+        mkdir -p pkg/DEBIAN
+        mkdir -p pkg/usr/local/bin
+        mkdir -p pkg/etc/http-proxy-rs
+        mkdir -p pkg/lib/systemd/system
+        mkdir -p pkg/usr/share/doc/http-proxy-rs
+
+    - name: Copy binary
+      run: |
+        cp target/release/http-proxy-rs pkg/usr/local/bin/
+        chmod 755 pkg/usr/local/bin/http-proxy-rs
+
+    - name: Copy configuration
+      run: |
+        cp config.json pkg/etc/http-proxy-rs/config.json
+        chmod 644 pkg/etc/http-proxy-rs/config.json
+
+    - name: Create systemd service file
+      run: |
+        cat > pkg/lib/systemd/system/http-proxy-rs.service << 'EOF'
+        [Unit]
+        Description=HTTP Proxy RS - Minimal proxy for serving and caching web content
+        After=network.target
+        Wants=network.target
+
+        [Service]
+        Type=simple
+        User=http-proxy-rs
+        Group=http-proxy-rs
+        WorkingDirectory=/etc/http-proxy-rs
+        ExecStart=/usr/local/bin/http-proxy-rs --listen 0.0.0.0:8080 --config /etc/http-proxy-rs/config.json
+        Restart=always
+        RestartSec=5
+        Environment=RUST_LOG=info
+        Environment=RUST_BACKTRACE=1
+
+        # Security settings
+        NoNewPrivileges=true
+        PrivateTmp=true
+        ProtectSystem=strict
+        ProtectHome=true
+        ReadWritePaths=/var/log/http-proxy-rs
+        CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+        AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+        [Install]
+        WantedBy=multi-user.target
+        EOF
+
+    - name: Create documentation
+      run: |
+        cat > pkg/usr/share/doc/http-proxy-rs/README << 'EOF'
+        HTTP Proxy RS
+        =============
+
+        A minimal proxy server for serving and caching web content that may be 
+        blocked by tracking protection or CORS policies.
+
+        Configuration:
+        - Main config: /etc/http-proxy-rs/config.json
+        - Service: systemctl start http-proxy-rs
+        - Logs: journalctl -u http-proxy-rs
+
+        Usage:
+        - Direct: /usr/local/bin/http-proxy-rs --help
+        - Service: systemctl enable --now http-proxy-rs
+
+        For more information, visit the project repository.
+        EOF
+
+    - name: Copy license
+      run: cp LICENSE pkg/usr/share/doc/http-proxy-rs/copyright
+
+    - name: Create postinstall script
+      run: |
+        cat > pkg/DEBIAN/postinst << 'EOF'
+        #!/bin/bash
+        set -e
+
+        # Create user and group
+        if ! getent group http-proxy-rs >/dev/null 2>&1; then
+            groupadd --system http-proxy-rs
+        fi
+
+        if ! getent passwd http-proxy-rs >/dev/null 2>&1; then
+            useradd --system --gid http-proxy-rs --home-dir /var/lib/http-proxy-rs \
+                    --shell /bin/false --comment "HTTP Proxy RS daemon" http-proxy-rs
+        fi
+
+        # Create log directory
+        mkdir -p /var/log/http-proxy-rs
+        chown http-proxy-rs:http-proxy-rs /var/log/http-proxy-rs
+        chmod 755 /var/log/http-proxy-rs
+
+        # Reload systemd
+        systemctl daemon-reload
+
+        # Enable and start service
+        systemctl enable http-proxy-rs.service
+
+        echo "HTTP Proxy RS installed successfully!"
+        echo "Start with: sudo systemctl start http-proxy-rs"
+        echo "View logs: sudo journalctl -u http-proxy-rs -f"
+        echo "Config at: /etc/http-proxy-rs/config.json"
+        EOF
+
+        chmod 755 pkg/DEBIAN/postinst
+
+    - name: Create preremove script
+      run: |
+        cat > pkg/DEBIAN/prerm << 'EOF'
+        #!/bin/bash
+        set -e
+
+        # Stop and disable service
+        systemctl stop http-proxy-rs.service || true
+        systemctl disable http-proxy-rs.service || true
+        EOF
+
+        chmod 755 pkg/DEBIAN/prerm
+
+    - name: Create postremove script
+      run: |
+        cat > pkg/DEBIAN/postrm << 'EOF'
+        #!/bin/bash
+        set -e
+
+        case "$1" in
+            purge)
+                # Remove user and group
+                userdel http-proxy-rs 2>/dev/null || true
+                groupdel http-proxy-rs 2>/dev/null || true
+                
+                # Remove log directory
+                rm -rf /var/log/http-proxy-rs
+                
+                # Remove config directory if empty
+                rmdir /etc/http-proxy-rs 2>/dev/null || true
+                ;;
+        esac
+
+        # Reload systemd
+        systemctl daemon-reload || true
+        EOF
+
+        chmod 755 pkg/DEBIAN/postrm
+
+    - name: Create Debian control file
+      run: |
+        cat > pkg/DEBIAN/control << EOF
+        Package: http-proxy-rs
+        Version: ${{ steps.get_version.outputs.VERSION }}
+        Section: web
+        Priority: optional
+        Architecture: amd64
+        Depends: libc6 (>= 2.31), libssl1.1 | libssl3, ca-certificates
+        Maintainer: Thomas Q <noreply@github.com>
+        Description: Minimal proxy for serving and caching web content
+         HTTP Proxy RS is a minimal proxy server built in Rust that helps serve
+         and cache web content that may be blocked by tracking protection or
+         CORS policies. It includes features like rate limiting, domain filtering,
+         content caching, and security headers modification.
+         .
+         Key features:
+         - Domain allowlist/blocklist
+         - Built-in caching with TTL support
+         - Rate limiting per IP
+         - CORS header injection
+         - Tracking header removal
+         - Systemd integration
+        Homepage: https://github.com/your-username/http-proxy-rs
+        EOF
+
+    - name: Build Debian package
+      run: |
+        dpkg-deb --build pkg http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
+
+    - name: Verify package
+      run: |
+        dpkg-deb --info http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
+        dpkg-deb --contents http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
+
+    - name: Upload Debian package to release
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
+        asset_name: http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
+        asset_content_type: application/vnd.debian.binary-package
+
+    - name: Generate installation instructions
+      run: |
+        cat > installation-instructions.md << 'EOF'
+        # Installation Instructions
+
+        ## Install the .deb package:
+        ```bash
+        wget https://github.com/${{ github.repository }}/releases/download/${{ steps.get_version.outputs.VERSION }}/http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
+        sudo dpkg -i http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
+        ```
+
+        ## Start the service:
+        ```bash
+        sudo systemctl start http-proxy-rs
+        sudo systemctl enable http-proxy-rs
+        ```
+
+        ## Check status:
+        ```bash
+        sudo systemctl status http-proxy-rs
+        sudo journalctl -u http-proxy-rs -f
+        ```
+
+        ## Configuration:
+        Edit `/etc/http-proxy-rs/config.json` and restart the service.
+
+        ## Usage:
+        The proxy listens on port 8080 by default.
+        Access: `http://localhost:8080/proxy/https://example.com`
+
+        ## Uninstall:
+        ```bash
+        sudo apt remove http-proxy-rs
+        # or to remove config files too:
+        sudo apt purge http-proxy-rs
+        ```
+        EOF
+
+    - name: Upload installation instructions
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./installation-instructions.md
+        asset_name: installation-instructions.md
+        asset_content_type: text/markdown
