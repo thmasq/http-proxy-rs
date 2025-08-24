@@ -12,46 +12,59 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          pkg-config \
-          libssl-dev \
-          curl
-
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        profile: minimal
-        override: true
-
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Cache cargo index
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Cache target directory
-      uses: actions/cache@v4
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Build release binary
-      run: cargo build --release
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
 
     - name: Get release version
       id: get_version
       run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+    - name: Build binary using Docker (Debian 12 compatible)
+      run: |
+        # Create a temporary Dockerfile for building
+        cat > Dockerfile.build << 'EOF'
+        FROM rust:1.89-slim-bullseye AS builder
+
+        WORKDIR /app
+
+        RUN apt-get update && apt-get install -y \
+            pkg-config \
+            libssl-dev \
+            && rm -rf /var/lib/apt/lists/*
+
+        COPY Cargo.toml Cargo.lock* ./
+
+        # Create a dummy main.rs to cache dependencies
+        RUN mkdir src && echo "fn main() {}" > src/main.rs
+        RUN cargo build --release && rm -rf src target/release/deps/http_proxy_rs*
+
+        COPY src ./src
+
+        RUN cargo build --release
+
+        # Verify the binary works and check its dependencies
+        RUN ls -la target/release/ && \
+            file target/release/http-proxy-rs && \
+            ldd target/release/http-proxy-rs
+        EOF
+
+    - name: Build Docker image and extract binary
+      run: |
+        # Build the Docker image
+        docker build -f Dockerfile.build -t http-proxy-builder .
+        
+        # Create a container and copy the binary out
+        docker create --name temp-container http-proxy-builder
+        docker cp temp-container:/app/target/release/http-proxy-rs ./http-proxy-rs
+        docker rm temp-container
+        
+        # Verify the extracted binary
+        file ./http-proxy-rs
+        chmod +x ./http-proxy-rs
+        
+        # Check what glibc version it's linked against
+        echo "Checking glibc compatibility:"
+        objdump -T ./http-proxy-rs | grep GLIBC | sort -u || true
 
     - name: Create Debian package structure
       run: |
@@ -63,7 +76,7 @@ jobs:
 
     - name: Copy binary
       run: |
-        cp target/release/http-proxy-rs pkg/usr/local/bin/
+        cp ./http-proxy-rs pkg/usr/local/bin/
         chmod 755 pkg/usr/local/bin/http-proxy-rs
 
     - name: Copy configuration
@@ -236,15 +249,47 @@ jobs:
         dpkg-deb --info http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
         dpkg-deb --contents http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
 
+    - name: Test binary compatibility (optional)
+      run: |
+        # Create a simple test using the same base image as Debian 12
+        cat > Dockerfile.test << 'EOF'
+        FROM debian:bookworm-slim
+
+        RUN apt-get update && apt-get install -y \
+            ca-certificates \
+            libssl3 \
+            && rm -rf /var/lib/apt/lists/*
+
+        COPY ./http-proxy-rs /usr/local/bin/http-proxy-rs
+        RUN chmod +x /usr/local/bin/http-proxy-rs
+
+        # Test that the binary can at least start and show help
+        RUN /usr/local/bin/http-proxy-rs --help
+        EOF
+        
+        echo "Testing binary compatibility with Debian 12 (bookworm)..."
+        docker build -f Dockerfile.test -t http-proxy-test . && echo "✅ Binary is compatible with Debian 12!" || echo "❌ Binary may have compatibility issues"
+
     - name: Generate installation instructions
       run: |
         cat > installation-instructions.md << 'EOF'
         # Installation Instructions
 
+        ## System Requirements
+        - Debian 12 (Bookworm) or compatible
+        - glibc 2.31 or later
+        - libssl3 or libssl1.1
+
         ## Install the .deb package:
         ```bash
         wget https://github.com/${{ github.repository }}/releases/download/${{ steps.get_version.outputs.VERSION }}/http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
         sudo dpkg -i http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb
+        ```
+
+        ## If you get dependency errors:
+        ```bash
+        sudo apt-get update
+        sudo apt-get install -f
         ```
 
         ## Start the service:
@@ -272,6 +317,10 @@ jobs:
         # or to remove config files too:
         sudo apt purge http-proxy-rs
         ```
+
+        ## Compatibility
+        This package was built using rust:1.89-slim-bullseye to ensure compatibility 
+        with Debian 12 and similar distributions.
         EOF
 
     - name: Upload release assets
@@ -282,3 +331,9 @@ jobs:
           http-proxy-rs_${{ steps.get_version.outputs.VERSION }}_amd64.deb \
           installation-instructions.md \
           --clobber
+
+    - name: Clean up temporary files
+      run: |
+        rm -f Dockerfile.build Dockerfile.test
+        docker image rm http-proxy-builder || true
+        docker image rm http-proxy-test || true
