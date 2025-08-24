@@ -31,6 +31,7 @@ jobs:
             pkg-config \
             libssl-dev \
             cmake \
+            file \
             && rm -rf /var/lib/apt/lists/*
 
         COPY Cargo.toml Cargo.lock* ./
